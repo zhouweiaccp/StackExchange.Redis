@@ -339,9 +339,11 @@ namespace StackExchange.Redis.Server
             if (value.IsNil) return; // not actually a request (i.e. empty/whitespace request)
             if (client != null && client.ShouldSkipResponse()) return; // intentionally skipping the result
 
-            if (client != null)
+            bool haveLock = false;
+            if (client != null && client.SubscriptionCount != 0)
             {
                 await client.TakeWriteLockAsync();
+                haveLock = true;
             }
             try
             {
@@ -396,7 +398,7 @@ namespace StackExchange.Redis.Server
             }
             finally
             {
-                if (client != null)
+                if (haveLock)
                 {
                     client.ReleaseWriteLock();
                 }
