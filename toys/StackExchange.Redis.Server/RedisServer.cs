@@ -538,18 +538,13 @@ namespace StackExchange.Redis.Server
             try
             {
                 var output = client?.LinkedPipe?.Output;
-                if (output == null)
-                {
-                    Console.WriteLine("No pipe");
-                    return false;
-                }
+                if (output == null) return false;
 
                 await WriteResponseAsync(client, output, value);
                 return true;
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine(ex.Message);
                 return false;
             }
         }
