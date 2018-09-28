@@ -78,6 +78,6 @@ namespace StackExchange.Redis.Server
 
         private readonly SemaphoreSlim _writeLock = new SemaphoreSlim(1);
         internal Task TakeWriteLockAsync() => _writeLock.WaitAsync();
-        internal void ReleasseWriteLock() => _writeLock.Release();
+        internal void ReleaseWriteLock() => _writeLock.Release();
     }
 }

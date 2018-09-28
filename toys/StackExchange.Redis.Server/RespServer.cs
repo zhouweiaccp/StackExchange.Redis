@@ -398,7 +398,7 @@ namespace StackExchange.Redis.Server
             {
                 if (client != null)
                 {
-                    client.ReleasseWriteLock();
+                    client.ReleaseWriteLock();
                 }
             }
         }
