@@ -1,8 +1,10 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace StackExchange.Redis.Server
 {
@@ -435,7 +437,20 @@ namespace StackExchange.Redis.Server
         }
         [RedisCommand(-1, LockFree = true, MaxArgs = 2)]
         protected virtual TypedRedisValue Ping(RedisClient client, RedisRequest request)
-            => TypedRedisValue.SimpleString(request.Count == 1 ? "PONG" : request.GetString(1));
+        {
+            if (client.SubscriptionCount == 0)
+            {
+                return TypedRedisValue.SimpleString(request.Count == 1 ? "PONG" : request.GetString(1));
+            }
+            else
+            {
+                // strictly speaking this is a >=3.0 feature
+                var pong = TypedRedisValue.Rent(2, out var span);
+                span[0] = TypedRedisValue.BulkString("pong");
+                span[1] = TypedRedisValue.BulkString(request.Count == 1 ? RedisValue.EmptyString : request.GetValue(1));
+                return pong;
+            }
+        }
 
         [RedisCommand(1, LockFree = true)]
         protected virtual TypedRedisValue Quit(RedisClient client, RedisRequest request)
@@ -465,10 +480,11 @@ namespace StackExchange.Redis.Server
             return TypedRedisValue.OK;
         }
 
-        [RedisCommand(-2)]
+        [RedisCommand(-2, LockFree = true)]
         protected virtual TypedRedisValue Subscribe(RedisClient client, RedisRequest request)
             => SubscribeImpl(client, request);
-        [RedisCommand(-2)]
+
+        [RedisCommand(-2, LockFree = true)]
         protected virtual TypedRedisValue Unsubscribe(RedisClient client, RedisRequest request)
             => SubscribeImpl(client, request);
 
@@ -506,6 +522,66 @@ namespace StackExchange.Redis.Server
             s_Subscribe = new CommandBytes("subscribe"),
             s_Unsubscribe = new CommandBytes("unsubscribe");
         private static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        static readonly RedisValue s_MESSAGE = Encoding.ASCII.GetBytes("message");
+        static TypedRedisValue CreateBroadcastMessage(RedisChannel channel, RedisValue payload)
+        {
+            var msg = TypedRedisValue.Rent(3, out var span);
+            span[0] = TypedRedisValue.BulkString(s_MESSAGE);
+            span[1] = TypedRedisValue.BulkString(channel.Value);
+            span[2] = TypedRedisValue.BulkString(payload);
+            return msg;
+        }
+
+        private async ValueTask<bool> TrySendOutOfBandAsync(RedisClient client, TypedRedisValue value)
+        {
+            try
+            {
+                var output = client?.LinkedPipe?.Output;
+                if (output == null)
+                {
+                    Console.WriteLine("No pipe");
+                    return false;
+                }
+
+                await WriteResponseAsync(client, output, value);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+                return false;
+            }
+        }
+
+        private async Task BackgroundPublish(ArraySegment<RedisClient> clients, RedisChannel channel, RedisValue payload)
+        {
+            var msg = CreateBroadcastMessage(channel, payload);
+            foreach (var sub in clients)
+            {
+                await TrySendOutOfBandAsync(sub, msg);
+            }
+            // only recycle on success, to avoid issues
+            msg.Recycle();
+            ArrayPool<RedisClient>.Shared.Return(clients.Array);
+        }
+
+        [RedisCommand(3, LockFree = true)]
+        protected virtual TypedRedisValue Publish(RedisClient client, RedisRequest request)
+        {
+            var channel = request.GetChannel(1, RedisChannel.PatternMode.Literal);
+
+            var subscribers = FilterSubscribers(channel);
+            int count = subscribers.Count;
+            if (count != 0)
+            {
+                var payload = request.GetValue(2);
+                Task.Run(() => BackgroundPublish(subscribers, channel, payload));
+            }
+            return TypedRedisValue.Integer(count);
+        }
+
+
 
         [RedisCommand(1, LockFree = true)]
         protected virtual TypedRedisValue Time(RedisClient client, RedisRequest request)

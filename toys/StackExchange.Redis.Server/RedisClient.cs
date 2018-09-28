@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO.Pipelines;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace StackExchange.Redis.Server
 {
@@ -20,16 +22,39 @@ namespace StackExchange.Redis.Server
         public int SubscriptionCount => _subscripions?.Count ?? 0;
         internal int Subscribe(RedisChannel channel)
         {
-            if (_subscripions == null) _subscripions = new HashSet<RedisChannel>();
-            _subscripions.Add(channel);
-            return _subscripions.Count;
+            var subs = _subscripions;
+            if(subs == null)
+            {
+                subs = new HashSet<RedisChannel>(); // but need to watch for compete
+                subs = Interlocked.CompareExchange(ref _subscripions, subs, null) ?? subs;
+            }
+            lock (subs)
+            {
+                subs.Add(channel);
+                return subs.Count;
+            }
         }
         internal int Unsubscribe(RedisChannel channel)
         {
-            if (_subscripions == null) return 0;
-            _subscripions.Remove(channel);
-            return _subscripions.Count;
+            var subs = _subscripions;
+            if (subs == null) return 0;
+            lock (subs)
+            {
+                subs.Remove(channel);
+                return subs.Count;
+            }
         }
+
+        internal bool IsSubscribed(RedisChannel channel)
+        {
+            var subs = _subscripions;
+            if (subs == null) return false;
+            lock (subs)
+            {
+                return subs.Contains(channel);
+            }
+        }
+
         public int Database { get; set; }
         public string Name { get; set; }
         internal IDuplexPipe LinkedPipe { get; set; }
@@ -50,5 +75,9 @@ namespace StackExchange.Redis.Server
                 if (pipe is IDisposable d) try { d.Dispose(); } catch { }
             }
         }
+
+        private readonly SemaphoreSlim _writeLock = new SemaphoreSlim(1);
+        internal Task TakeWriteLockAsync() => _writeLock.WaitAsync();
+        internal void ReleasseWriteLock() => _writeLock.Release();
     }
 }

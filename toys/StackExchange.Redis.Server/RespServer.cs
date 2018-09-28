@@ -189,17 +189,41 @@ namespace StackExchange.Redis.Server
 
         // for extensibility, so that a subclass can get their own client type
         // to be used via ListenForConnections
-        public virtual RedisClient CreateClient() => new RedisClient();
+        public virtual RedisClient CreateClient(IDuplexPipe pipe) => new RedisClient { LinkedPipe = pipe };
 
         public int ClientCount
         {
             get { lock (_clients) { return _clients.Count; } }
         }
+
+        protected ArraySegment<RedisClient> FilterSubscribers(RedisChannel channel)
+        {
+            lock (_clients)
+            {
+                var arr = ArrayPool<RedisClient>.Shared.Rent(_clients.Count);
+                int count = 0;
+                foreach(var client in _clients)
+                {
+                    if (client.IsSubscribed(channel))
+                        arr[count++] = client;
+                }
+                if (count == 0)
+                {
+                    ArrayPool<RedisClient>.Shared.Return(arr);
+                    return default; // Count=0, importantly
+                }
+                else
+                {
+                    return new ArraySegment<RedisClient>(arr, 0, count);
+                }
+            }
+        }
+
         public int TotalClientCount { get; private set; }
         private int _nextId;
-        public RedisClient AddClient()
+        public RedisClient AddClient(IDuplexPipe pipe)
         {
-            var client = CreateClient();
+            var client = CreateClient(pipe);
             lock (_clients)
             {
                 ThrowIfShutdown();
@@ -250,7 +274,7 @@ namespace StackExchange.Redis.Server
             RedisClient client = null;
             try
             {
-                client = AddClient();
+                client = AddClient(pipe);
                 while (!client.Closed)
                 {
                     var readResult = await pipe.Input.ReadAsync().ConfigureAwait(false);
@@ -314,54 +338,69 @@ namespace StackExchange.Redis.Server
 
             if (value.IsNil) return; // not actually a request (i.e. empty/whitespace request)
             if (client != null && client.ShouldSkipResponse()) return; // intentionally skipping the result
-            char prefix;
-            switch (value.Type)
-            {
-                case ResultType.Integer:
-                    PhysicalConnection.WriteInteger(output, (long)value.AsRedisValue());
-                    break;
-                case ResultType.Error:
-                    prefix = '-';
-                    goto BasicMessage;
-                case ResultType.SimpleString:
-                    prefix = '+';
-                    BasicMessage:
-                    WritePrefix(output, prefix);
-                    var val = (string)value.AsRedisValue();
-                    var expectedLength = Encoding.UTF8.GetByteCount(val);
-                    PhysicalConnection.WriteRaw(output, val, expectedLength);
-                    PhysicalConnection.WriteCrlf(output);
-                    break;
-                case ResultType.BulkString:
-                    PhysicalConnection.WriteBulkString(value.AsRedisValue(), output);
-                    break;
-                case ResultType.MultiBulk:
-                    if (value.IsNullArray)
-                    {
-                        PhysicalConnection.WriteMultiBulkHeader(output, -1);
-                    }
-                    else
-                    {
-                        var segment = value.Segment;
-                        PhysicalConnection.WriteMultiBulkHeader(output, segment.Count);
-                        var arr = segment.Array;
-                        int offset = segment.Offset;
-                        for (int i = 0; i < segment.Count; i++)
-                        {
-                            var item = arr[offset++];
-                            if (item.IsNil)
-                                throw new InvalidOperationException("Array element cannot be nil, index " + i);
 
-                            // note: don't pass client down; this would impact SkipReplies
-                            await WriteResponseAsync(null, output, item);
-                        }
-                    }
-                    break;
-                default:
-                    throw new InvalidOperationException(
-                        "Unexpected result type: " + value.Type);
+            if (client != null)
+            {
+                await client.TakeWriteLockAsync();
             }
-            await output.FlushAsync().ConfigureAwait(false);
+            try
+            {
+                char prefix;
+                switch (value.Type)
+                {
+                    case ResultType.Integer:
+                        PhysicalConnection.WriteInteger(output, (long)value.AsRedisValue());
+                        break;
+                    case ResultType.Error:
+                        prefix = '-';
+                        goto BasicMessage;
+                    case ResultType.SimpleString:
+                        prefix = '+';
+                        BasicMessage:
+                        WritePrefix(output, prefix);
+                        var val = (string)value.AsRedisValue();
+                        var expectedLength = Encoding.UTF8.GetByteCount(val);
+                        PhysicalConnection.WriteRaw(output, val, expectedLength);
+                        PhysicalConnection.WriteCrlf(output);
+                        break;
+                    case ResultType.BulkString:
+                        PhysicalConnection.WriteBulkString(value.AsRedisValue(), output);
+                        break;
+                    case ResultType.MultiBulk:
+                        if (value.IsNullArray)
+                        {
+                            PhysicalConnection.WriteMultiBulkHeader(output, -1);
+                        }
+                        else
+                        {
+                            var segment = value.Segment;
+                            PhysicalConnection.WriteMultiBulkHeader(output, segment.Count);
+                            var arr = segment.Array;
+                            int offset = segment.Offset;
+                            for (int i = 0; i < segment.Count; i++)
+                            {
+                                var item = arr[offset++];
+                                if (item.IsNil)
+                                    throw new InvalidOperationException("Array element cannot be nil, index " + i);
+
+                                // note: don't pass client down; this would impact SkipReplies
+                                await WriteResponseAsync(null, output, item);
+                            }
+                        }
+                        break;
+                    default:
+                        throw new InvalidOperationException(
+                            "Unexpected result type: " + value.Type);
+                }
+                await output.FlushAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                if (client != null)
+                {
+                    client.ReleasseWriteLock();
+                }
+            }
         }
         public static bool TryParseRequest(ref ReadOnlySequence<byte> buffer, out RedisRequest request)
         {
