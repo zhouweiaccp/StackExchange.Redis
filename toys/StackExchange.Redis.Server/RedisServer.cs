@@ -576,6 +576,15 @@ namespace StackExchange.Redis.Server
             return TypedRedisValue.Integer(count);
         }
 
+        [RedisCommand(-3, "pubsub", "numsub", LockFree = true)]
+        protected virtual TypedRedisValue PubsubNumsub(RedisClient client, RedisRequest request)
+        {
+            var channel = request.GetChannel(2, RedisChannel.PatternMode.Literal);
+            var subscribers = FilterSubscribers(channel);
+            int count = subscribers.Count;
+            if (count != 0) ArrayPool<RedisClient>.Shared.Return(subscribers.Array);
+            return TypedRedisValue.Integer(count);
+        }
 
 
         [RedisCommand(1, LockFree = true)]

@@ -52,7 +52,9 @@ namespace StackExchange.Redis.Server
                 if (grp.Any(x => x.IsSubCommand))
                 {
                     var subs = grp.Where(x => x.IsSubCommand).ToArray();
-                    parent = grp.SingleOrDefault(x => !x.IsSubCommand).WithSubCommands(subs);
+                    parent = grp.SingleOrDefault(x => !x.IsSubCommand);
+                    if (parent.Command == null) parent = new RespCommand(subs[0].Command);
+                    parent = parent.WithSubCommands(subs);
                 }
                 else
                 {
@@ -136,6 +138,13 @@ namespace StackExchange.Redis.Server
                 LockFree = parent.LockFree;
                 _operation = parent._operation;
                 _subcommands = subs;
+            }
+
+            internal RespCommand(string command) : this()
+            {
+                Command = command;
+                Arity = -1;
+                MaxArgs = int.MaxValue;
             }
             public bool IsUnknown => _operation == null;
             public RespCommand Resolve(in RedisRequest request)
