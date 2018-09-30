@@ -499,18 +499,32 @@ namespace StackExchange.Redis.Server
             {
                 var channel = request.GetChannel(i, mode);
                 int count;
-                if (s_Subscribe.Equals(cmd))
+
+                lock (_fullSubs)
                 {
-                    count = client.Subscribe(channel);
-                }
-                else if (s_Unsubscribe.Equals(cmd))
-                {
-                    count = client.Unsubscribe(channel);
-                }
-                else
-                {
-                    reply.Recycle(index);
-                    return TypedRedisValue.Nil;
+                    count = client.SubscriptionCount;
+                    if (s_Subscribe.Equals(cmd))
+                    {
+                        if(!_fullSubs.TryGetValue(channel, out var clients))
+                        {
+                            clients = new HashSet<RedisClient>();
+                            _fullSubs.Add(channel, clients);
+                        }
+                        if (clients.Add(client)) count = client.IncrSubscsriptionCount();
+                    }
+                    else if (s_Unsubscribe.Equals(cmd))
+                    {
+                        if (_fullSubs.TryGetValue(channel, out var clients)
+                            && clients.Remove(client))
+                        {
+                            count = client.DecrSubscsriptionCount();
+                        }
+                    }
+                    else
+                    {
+                        reply.Recycle(index);
+                        return TypedRedisValue.Nil;
+                    }
                 }
                 span[index++] = cmdString;
                 span[index++] = TypedRedisValue.BulkString((byte[])channel);
@@ -523,8 +537,8 @@ namespace StackExchange.Redis.Server
             s_Unsubscribe = new CommandBytes("unsubscribe");
         private static readonly DateTime UnixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-        static readonly RedisValue s_MESSAGE = Encoding.ASCII.GetBytes("message");
-        static TypedRedisValue CreateBroadcastMessage(RedisChannel channel, RedisValue payload)
+        private static readonly RedisValue s_MESSAGE = Encoding.ASCII.GetBytes("message");
+        private static TypedRedisValue CreateBroadcastMessage(RedisChannel channel, RedisValue payload)
         {
             var msg = TypedRedisValue.Rent(3, out var span);
             span[0] = TypedRedisValue.BulkString(s_MESSAGE);
@@ -551,14 +565,21 @@ namespace StackExchange.Redis.Server
 
         private async Task BackgroundPublish(ArraySegment<RedisClient> clients, RedisChannel channel, RedisValue payload)
         {
-            var msg = CreateBroadcastMessage(channel, payload);
-            foreach (var sub in clients)
+            try
             {
-                await TrySendOutOfBandAsync(sub, msg);
+                var msg = CreateBroadcastMessage(channel, payload);
+                foreach (var sub in clients)
+                {
+                    await TrySendOutOfBandAsync(sub, msg).ConfigureAwait(false);
+                }
+                // only recycle on success, to avoid issues
+                msg.Recycle();
+                ArrayPool<RedisClient>.Shared.Return(clients.Array);
             }
-            // only recycle on success, to avoid issues
-            msg.Recycle();
-            ArrayPool<RedisClient>.Shared.Return(clients.Array);
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.Message);
+            }
         }
 
         [RedisCommand(3, LockFree = true)]
@@ -576,16 +597,58 @@ namespace StackExchange.Redis.Server
             return TypedRedisValue.Integer(count);
         }
 
+        private readonly Dictionary<RedisChannel, HashSet<RedisClient>> _fullSubs = new Dictionary<RedisChannel, HashSet<RedisClient>>();
+
+        protected ArraySegment<RedisClient> FilterSubscribers(RedisChannel channel)
+        {
+            lock (_fullSubs)
+            {
+                if (!_fullSubs.TryGetValue(channel, out var clients)) return default;
+
+                var arr = ArrayPool<RedisClient>.Shared.Rent(clients.Count);
+                clients.CopyTo(arr);
+                return new ArraySegment<RedisClient>(arr, 0, clients.Count);
+            }
+        }
+
+        protected override void OnRemoveClient(RedisClient client)
+        {
+            lock (_fullSubs)
+            {
+                List<RedisChannel> nowEmpty = null;
+                foreach(var pair in _fullSubs)
+                {
+                    var set = pair.Value;
+                    if(set.Remove(client) && set.Count == 0)
+                    {
+                        (nowEmpty ?? (nowEmpty = new List<RedisChannel>())).Add(pair.Key);
+                    }
+                }
+                if(nowEmpty != null)
+                {
+                    foreach (var channel in nowEmpty) _fullSubs.Remove(channel);
+                }
+            }
+            base.OnRemoveClient(client);
+        }
+
         [RedisCommand(-3, "pubsub", "numsub", LockFree = true)]
         protected virtual TypedRedisValue PubsubNumsub(RedisClient client, RedisRequest request)
         {
-            var channel = request.GetChannel(2, RedisChannel.PatternMode.Literal);
-            var subscribers = FilterSubscribers(channel);
-            int count = subscribers.Count;
-            if (count != 0) ArrayPool<RedisClient>.Shared.Return(subscribers.Array);
-            return TypedRedisValue.Integer(count);
+            var reply = TypedRedisValue.Rent((request.Count - 2) * 2, out var span);
+            int index = 0;
+            lock (_fullSubs)
+            {
+                for(int i = 2; i < request.Count; i++)
+                {
+                    var channel = request.GetChannel(i, RedisChannel.PatternMode.Literal);
+                    var count = _fullSubs.TryGetValue(channel, out var clients) ? clients.Count : 0;
+                    span[index++] = TypedRedisValue.BulkString(channel.Value);
+                    span[index++] = TypedRedisValue.Integer(count);
+                }
+            }
+            return reply;
         }
-
 
         [RedisCommand(1, LockFree = true)]
         protected virtual TypedRedisValue Time(RedisClient client, RedisRequest request)

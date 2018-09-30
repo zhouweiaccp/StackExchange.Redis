@@ -205,29 +205,6 @@ namespace StackExchange.Redis.Server
             get { lock (_clients) { return _clients.Count; } }
         }
 
-        protected ArraySegment<RedisClient> FilterSubscribers(RedisChannel channel)
-        {
-            lock (_clients)
-            {
-                var arr = ArrayPool<RedisClient>.Shared.Rent(_clients.Count);
-                int count = 0;
-                foreach(var client in _clients)
-                {
-                    if (client.IsSubscribed(channel))
-                        arr[count++] = client;
-                }
-                if (count == 0)
-                {
-                    ArrayPool<RedisClient>.Shared.Return(arr);
-                    return default; // Count=0, importantly
-                }
-                else
-                {
-                    return new ArraySegment<RedisClient>(arr, 0, count);
-                }
-            }
-        }
-
         public int TotalClientCount { get; private set; }
         private int _nextId;
         public RedisClient AddClient(IDuplexPipe pipe)
@@ -245,12 +222,16 @@ namespace StackExchange.Redis.Server
         public bool RemoveClient(RedisClient client)
         {
             if (client == null) return false;
+            bool result;
             lock (_clients)
             {
-                client.Closed = true;
-                return _clients.Remove(client);
+                client.SetClosed();
+                result = _clients.Remove(client);
             }
+            if (result) OnRemoveClient(client);
+            return result;
         }
+        protected virtual void OnRemoveClient(RedisClient client) { }
 
         private readonly TaskCompletionSource<ShutdownReason> _shutdown = TaskSource.Create<ShutdownReason>(null, TaskCreationOptions.RunContinuationsAsynchronously);
         private bool _isShutdown;
@@ -349,9 +330,9 @@ namespace StackExchange.Redis.Server
             if (client != null && client.ShouldSkipResponse()) return; // intentionally skipping the result
 
             bool haveLock = false;
-            if (client != null && client.SubscriptionCount != 0)
+            if (client != null && client.HasHadSubscsription)
             {
-                await client.TakeWriteLockAsync();
+                await client.TakeWriteLockAsync().ConfigureAwait(false);
                 haveLock = true;
             }
             try

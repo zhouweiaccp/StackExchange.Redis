@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,52 +17,45 @@ namespace StackExchange.Redis.Server
             }
             return false;
         }
-        private HashSet<RedisChannel> _subscripions;
-        public int SubscriptionCount => _subscripions?.Count ?? 0;
-        internal int Subscribe(RedisChannel channel)
+
+        [Flags]
+        private enum ClientFlags
         {
-            var subs = _subscripions;
-            if(subs == null)
-            {
-                subs = new HashSet<RedisChannel>(); // but need to watch for compete
-                subs = Interlocked.CompareExchange(ref _subscripions, subs, null) ?? subs;
-            }
-            lock (subs)
-            {
-                subs.Add(channel);
-                return subs.Count;
-            }
+            None = 0,
+            Closed = 1 << 0,
+            HasHadSubscsription = 1 << 1
         }
-        internal int Unsubscribe(RedisChannel channel)
+        private ClientFlags _flags;
+        private bool HasFlag(ClientFlags flag) => (_flags & flag) != 0;
+        private void SetFlag(ClientFlags flag, bool value)
         {
-            var subs = _subscripions;
-            if (subs == null) return 0;
-            lock (subs)
-            {
-                subs.Remove(channel);
-                return subs.Count;
-            }
+            if (value) _flags |= flag;
+            else _flags &= ~flag;
         }
 
-        internal bool IsSubscribed(RedisChannel channel)
+        private int _subscriptionCount;
+        public bool HasHadSubscsription => HasFlag(ClientFlags.HasHadSubscsription);
+        public int SubscriptionCount => Thread.VolatileRead(ref _subscriptionCount);
+
+        internal int IncrSubscsriptionCount()
         {
-            var subs = _subscripions;
-            if (subs == null) return false;
-            lock (subs)
-            {
-                return subs.Contains(channel);
-            }
+            SetFlag(ClientFlags.HasHadSubscsription, true);
+            return Interlocked.Increment(ref _subscriptionCount);
         }
+
+        internal int DecrSubscsriptionCount() => Interlocked.Decrement(ref _subscriptionCount);
 
         public int Database { get; set; }
         public string Name { get; set; }
         internal IDuplexPipe LinkedPipe { get; set; }
-        public bool Closed { get; internal set; }
+        public bool Closed => HasFlag(ClientFlags.Closed);
         public int Id { get; internal set; }
+
+        internal void SetClosed() => SetFlag(ClientFlags.Closed, true);
 
         public void Dispose()
         {
-            Closed = true;
+            SetClosed();
             var pipe = LinkedPipe;
             LinkedPipe = null;
             if (pipe != null)
