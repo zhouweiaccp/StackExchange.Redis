@@ -25,7 +25,7 @@ namespace StackExchange.Redis
             }
         }
 
-        // Uses [n=4] x UInt64 values to store a command payload,
+        // Uses [ChunkLength] x UInt64 values to store a command payload,
         // allowing allocation free storage and efficient
         // equality tests. If you're glancing at this and thinking
         // "that's what fixed buffers are for", please see:
@@ -114,7 +114,7 @@ namespace StackExchange.Redis
             }
         }
 
-        public unsafe CommandBytes(ReadOnlySpan<byte> value)
+        public unsafe CommandBytes(ReadOnlySpan<byte> value, bool caseInsensitive = true)
         {
             if (value.Length > MaxLength) throw new ArgumentOutOfRangeException("Maximum command length exceeed: " + value.Length + " bytes");
             _0 = _1 = _2 = 0L;
@@ -122,10 +122,17 @@ namespace StackExchange.Redis
             {
                 byte* bPtr = (byte*)uPtr;
                 value.CopyTo(new Span<byte>(bPtr + 1, value.Length));
-                *bPtr = (byte)UpperCasify(value.Length, bPtr + 1);
+                if (caseInsensitive)
+                {
+                    *bPtr = (byte)UpperCasify(value.Length, bPtr + 1);
+                }
+                else
+                {
+                    *bPtr = (byte)value.Length;
+                }
             }
         }
-        public unsafe CommandBytes(ReadOnlySequence<byte> value)
+        public unsafe CommandBytes(ReadOnlySequence<byte> value, bool caseInsensitive = true)
         {
             if (value.Length > MaxLength) throw new ArgumentOutOfRangeException("Maximum command length exceeed");
             int len = unchecked((int)value.Length);
@@ -147,7 +154,14 @@ namespace StackExchange.Redis
                         target = target.Slice(segment.Length);
                     }
                 }
-                *bPtr = (byte)UpperCasify(len, bPtr + 1);
+                if (caseInsensitive)
+                {
+                    *bPtr = (byte)UpperCasify(len, bPtr + 1);
+                }
+                else
+                {
+                    *bPtr = (byte)len;
+                }
             }
         }
         private unsafe int UpperCasify(int len, byte* bPtr)

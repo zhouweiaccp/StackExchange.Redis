@@ -49,16 +49,16 @@ namespace StackExchange.Redis.Server
         public RedisChannel GetChannel(int index, RedisChannel.PatternMode mode)
             => _inner[index].AsRedisChannel(null, mode);
 
-        internal bool TryGetCommandBytes(int i, out CommandBytes command)
+        internal bool TryGetCommandBytes(int index, out CommandBytes command, bool caseInsensitive = true)
         {
-            var payload = _inner[i].Payload;
+            var payload = _inner[index].Payload;
             if (payload.Length > CommandBytes.MaxLength)
             {
                 command = default;
                 return false;
             }
 
-            command = payload.IsEmpty ? default : new CommandBytes(payload);
+            command = payload.IsEmpty ? default : new CommandBytes(payload, caseInsensitive);
             return true;
         }
     }
