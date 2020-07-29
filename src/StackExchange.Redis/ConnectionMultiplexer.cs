@@ -32,7 +32,7 @@ namespace StackExchange.Redis
         private static FeatureFlags s_featureFlags;
 
         /// <summary>
-        /// Enables or disables a feature flag; this should only be used under support guidance, and should not be rapidly toggled
+        /// Enables or disables a feature flag; this should only be used under support guidance,指导，引导；领导 and should not be rapidly toggled
         /// </summary>
         [EditorBrowsable(EditorBrowsableState.Never)]
         [Browsable(false)]
@@ -49,7 +49,7 @@ namespace StackExchange.Redis
         {
             bool value = false;
             try
-            {   // attempt to detect a known problem scenario
+            {   // attempt to detect a known problem scenario 方案；情节；剧本；设想
                 value = SynchronizationContext.Current?.GetType()?.Name
                     == "LegacyAspNetSynchronizationContext";
             }
